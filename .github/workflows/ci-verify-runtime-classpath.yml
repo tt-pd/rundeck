@@ -1,14 +1,10 @@
 # Throwaway verification workflow. Lives only on ci-verify/** branches in a fork so the
-# PR branch stays clean.
+# PR branch stays clean. Not intended for upstream.
 #
-# The WAR's WEB-INF/lib is exactly the resolved :rundeckapp:runtimeClasspath, so resolving
-# that configuration is sufficient to prove the build-time toolchain is gone. This needs
-# only a JDK: no Node and no CLOUDSMITH_NPM_TOKEN, because verifyNodeVersion is wired to
-# NpmTask only and neither `dependencies` nor the reporter triggers an NpmTask.
-#
-# Assertions run against the resolved artifact list (ARTIFACT lines emitted by
-# .github/ci-verify-report.gradle), never against `gradle dependencies` output: the tree
-# also prints platform/BOM entries and "(c)" constraints, which are not artifacts.
+# A full `bootWar` is impossible on a public runner: rundeckapp/grails-spa and
+# grails-app/assets/javascripts/_package-manager resolve npm packages from
+# npm.artifacts.pd-internal.com, which answers 401 without CLOUDSMITH_NPM_TOKEN. Every
+# job below therefore avoids the NpmTask chain.
 name: verify-runtime-classpath
 
 on:
@@ -20,12 +16,18 @@ on:
 env:
   # Matched against resolved jar file names.
   FORBIDDEN: '^(gradle-tooling-api|grails-shell-cli|grails-gradle-common|grails-gradle-model|groovy-ant|groovy-groovydoc|groovy-docgenerator|qdox|groovy-test|maven-|org\.eclipse\.sisu|plexus-|ant-antlr)-'
-  # Commit this branch is based on, used to produce the before/after comparison.
   BASE_SHA: f2f142bc66d99d13a33a5e114dad8e11f4ca3e8e
+  # Tasks that would reach the private npm registry.
+  SKIP_NPM: >-
+    -x copySpa -x vendorAssetDeps -x assetCompile -x assetPluginPackage
+    -x copyAssetManifest
 
 jobs:
-  baseline:
-    name: base commit (expect present)
+  # Resolve runtimeClasspath and testRuntimeClasspath on both commits and diff them.
+  # testRuntimeClasspath extends testImplementation/testRuntimeOnly, not runtimeClasspath,
+  # so it must come out identical; that is what makes the test result meaningful.
+  classpaths:
+    name: classpath diff
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,66 +37,168 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Revert build.gradle to the base commit
+      - name: Report both configurations, fixed
+        run: |
+          for c in runtimeClasspath testRuntimeClasspath; do
+            ./gradlew --init-script .github/ci-verify-report.gradle \
+              :rundeckapp:reportConfiguration -Pconf=$c -q --console=plain --no-daemon \
+              > "$c-fixed.txt"
+            grep '^ARTIFACT' "$c-fixed.txt" | cut -f3 | sort > "jars-$c-fixed.txt"
+            grep '^TOTAL' "$c-fixed.txt"
+          done
+      - name: Report both configurations, base
         run: |
           git checkout "$BASE_SHA" -- rundeckapp/build.gradle
-          git --no-pager diff --stat HEAD -- rundeckapp/build.gradle
-      - name: Report resolved runtimeClasspath
+          for c in runtimeClasspath testRuntimeClasspath; do
+            ./gradlew --init-script .github/ci-verify-report.gradle \
+              :rundeckapp:reportConfiguration -Pconf=$c -q --console=plain --no-daemon \
+              > "$c-base.txt"
+            grep '^ARTIFACT' "$c-base.txt" | cut -f3 | sort > "jars-$c-base.txt"
+            grep '^TOTAL' "$c-base.txt"
+          done
+          git checkout HEAD -- rundeckapp/build.gradle
+      - name: runtimeClasspath must lose only the build-time toolchain
         run: |
-          ./gradlew --init-script .github/ci-verify-report.gradle \
-            :rundeckapp:reportRuntimeClasspath -q --console=plain --no-daemon \
-            | tee report-base.txt
-      - name: Summarise
+          echo "== removed =="
+          comm -23 jars-runtimeClasspath-base.txt jars-runtimeClasspath-fixed.txt \
+            | tee removed.txt
+          echo "== added (must be empty) =="
+          comm -13 jars-runtimeClasspath-base.txt jars-runtimeClasspath-fixed.txt \
+            | tee added.txt
+          test ! -s added.txt
+          # every removal must be an expected build-time artifact
+          if grep -vE "$FORBIDDEN" removed.txt | grep -v '^javax.inject-'; then
+            echo "::error::unexpected artifact removed from runtimeClasspath"
+            exit 1
+          fi
+          grep '^ARTIFACT' runtimeClasspath-base.txt \
+            | awk -F'\t' 'NR==FNR{r[$0]=1;next} ($3 in r){c+=$2;n++}
+                 END{printf "removed %d jars, %d bytes, %.2f MiB\n", n, c, c/1048576}' \
+                 removed.txt -
+      - name: testRuntimeClasspath must be unchanged
         run: |
-          grep '^ARTIFACT' report-base.txt | cut -f3 | sort > jars-base.txt
-          grep '^TOTAL' report-base.txt
-          echo
-          echo "build-time only artifacts present on the base commit:"
-          grep '^ARTIFACT' report-base.txt \
-            | awk -F'\t' -v re="$FORBIDDEN" '$3 ~ re {printf "%10d  %s\n", $2, $3; c+=$2; n++}
-                 END {printf "\n%d jars  %d bytes  %.2f MiB\n", n, c, c/1048576}'
+          if ! diff -u jars-testRuntimeClasspath-base.txt jars-testRuntimeClasspath-fixed.txt; then
+            echo "::error::testRuntimeClasspath changed; unit tests are affected"
+            exit 1
+          fi
+          echo "OK: testRuntimeClasspath is identical, unit tests cannot be affected"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: baseline
+          name: classpaths
           path: |
-            report-base.txt
-            jars-base.txt
+            runtimeClasspath-*.txt
+            testRuntimeClasspath-*.txt
+            jars-*.txt
+            removed.txt
+            added.txt
           if-no-files-found: warn
 
-  fixed:
-    name: with exclusions (expect absent)
+  unit-tests:
+    name: rundeckapp unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Report resolved runtimeClasspath
+      - name: :rundeckapp:test
         run: |
-          ./gradlew --init-script .github/ci-verify-report.gradle \
-            :rundeckapp:reportRuntimeClasspath -q --console=plain --no-daemon \
-            | tee report-fixed.txt
-          grep '^ARTIFACT' report-fixed.txt | cut -f3 | sort > jars-fixed.txt
-          grep '^TOTAL' report-fixed.txt
-      - name: Dependency tree (for review)
-        continue-on-error: true
+          ./gradlew :rundeckapp:test $SKIP_NPM \
+            --console=plain --no-daemon
+      - name: Summarise results
+        if: always()
         run: |
-          ./gradlew :rundeckapp:dependencies --configuration runtimeClasspath \
-            --console=plain --no-daemon > deps-fixed.txt
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          t=f=e=s=0
+          files=glob.glob('rundeckapp/build/test-results/test/*.xml')
+          for p in files:
+              try: r=ET.parse(p).getroot()
+              except Exception: continue
+              t+=int(r.get('tests',0)); f+=int(r.get('failures',0))
+              e+=int(r.get('errors',0)); s+=int(r.get('skipped',0))
+          print(f"result files={len(files)} tests={t} failures={f} errors={e} skipped={s}")
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: fixed
+          name: unit-test-results
           path: |
-            report-fixed.txt
-            jars-fixed.txt
-            deps-fixed.txt
+            rundeckapp/build/test-results/test/**/*.xml
+            rundeckapp/build/reports/tests/test/**
           if-no-files-found: warn
-      - name: Assert forbidden artifacts are gone
+
+  # Informational: does anything left on runtimeClasspath statically reference classes
+  # from the removed jars? Reference-only hits are not necessarily faults, because the JVM
+  # resolves classes lazily, but they are what a reviewer should look at.
+  static-refs:
+    name: static references into removed jars
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Stage both classpaths
         run: |
-          if grep -E "$FORBIDDEN" jars-fixed.txt; then
-            echo "::error::build-time only artifacts are still on :rundeckapp:runtimeClasspath"
-            exit 1
+          ./gradlew --init-script .github/ci-verify-report.gradle \
+            :rundeckapp:stageConfiguration -Pconf=runtimeClasspath -q --console=plain --no-daemon
+          mv rundeckapp/build/ci-verify/runtimeClasspath fixed-cp
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          ./gradlew --init-script .github/ci-verify-report.gradle \
+            :rundeckapp:stageConfiguration -Pconf=runtimeClasspath -q --console=plain --no-daemon
+          mv rundeckapp/build/ci-verify/runtimeClasspath base-cp
+          git checkout HEAD -- rundeckapp/build.gradle
+          echo "base=$(ls base-cp | wc -l) fixed=$(ls fixed-cp | wc -l)"
+      - name: Collect package prefixes owned by the removed jars
+        run: |
+          mkdir -p removed
+          for j in base-cp/*.jar; do
+            [ -f "fixed-cp/$(basename "$j")" ] || cp "$j" removed/
+          done
+          echo "removed jars: $(ls removed | wc -l)"
+          for j in removed/*.jar; do
+            unzip -Z1 "$j" '*.class' 2>/dev/null
+          done | sed 's/\.class$//' \
+               | awk -F/ 'NF>=3 {print $1"/"$2"/"$3"/"} NF==2 {print $1"/"$2"/"}' \
+               | sort -u > prefixes.txt
+          wc -l prefixes.txt
+          cat prefixes.txt
+      - name: Scan the surviving classpath for references
+        run: |
+          : > hits.txt
+          for j in fixed-cp/*.jar; do
+            if unzip -p "$j" '*.class' 2>/dev/null \
+                 | LC_ALL=C strings -a \
+                 | LC_ALL=C grep -F -f prefixes.txt -o 2>/dev/null \
+                 | sort -u > /tmp/h; then
+              if [ -s /tmp/h ]; then
+                while read -r pfx; do
+                  echo -e "$(basename "$j")\t$pfx" >> hits.txt
+                done < /tmp/h
+              fi
+            fi
+          done
+          echo "== jars referencing removed packages =="
+          if [ -s hits.txt ]; then
+            cut -f1 hits.txt | sort -u
+            echo
+            echo "== detail =="
+            sort -u hits.txt
+          else
+            echo "none"
           fi
-          echo "OK: no build-time only artifacts on the runtime classpath"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: static-refs
+          path: |
+            prefixes.txt
+            hits.txt
+          if-no-files-found: warn

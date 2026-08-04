@@ -1,20 +1,46 @@
-// Best-effort reporter: prints every artifact on :rundeckapp:runtimeClasspath with its
-// size, so the workflow can diff the resolved classpath between the base commit and the
-// fix. Applied via --init-script so it never has to live in the repository.
+// Verification helpers for the ci-verify workflow. Applied via --init-script so none of
+// this has to live in the repository.
+//
+//   reportConfiguration -Pconf=<name>   prints "ARTIFACT<TAB>size<TAB>filename" per
+//                                       resolved artifact, plus a TOTAL line
+//   stageConfiguration  -Pconf=<name>   copies every resolved artifact into
+//                                       build/ci-verify/<name>/
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
 gradle.projectsEvaluated {
     def app = gradle.rootProject.findProject(':rundeckapp')
     if (app == null) {
         return
     }
-    app.tasks.register('reportRuntimeClasspath') {
+
+    def confName = {
+        app.hasProperty('conf') ? app.property('conf').toString() : 'runtimeClasspath'
+    }
+
+    app.tasks.register('reportConfiguration') {
         doLast {
-            def files = app.configurations.runtimeClasspath.files.sort { it.name }
+            def name = confName()
+            def files = app.configurations.getByName(name).files.sort { it.name }
             long total = 0
             files.each { f ->
                 total += f.length()
                 println "ARTIFACT\t${f.length()}\t${f.name}"
             }
-            println "TOTAL\t${files.size()}\t${total}"
+            println "TOTAL\t${name}\t${files.size()}\t${total}"
+        }
+    }
+
+    app.tasks.register('stageConfiguration') {
+        doLast {
+            def name = confName()
+            def out = new File(app.buildDir, "ci-verify/${name}")
+            out.mkdirs()
+            app.configurations.getByName(name).files.each { f ->
+                Files.copy(f.toPath(), new File(out, f.name).toPath(),
+                        StandardCopyOption.REPLACE_EXISTING)
+            }
+            println "STAGED\t${name}\t${out.absolutePath}"
         }
     }
 }
