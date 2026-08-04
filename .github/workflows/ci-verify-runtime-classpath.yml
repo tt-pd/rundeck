@@ -160,49 +160,49 @@ jobs:
           mv rundeckapp/build/ci-verify/runtimeClasspath base-cp
           git checkout HEAD -- rundeckapp/build.gradle
           echo "base=$(ls base-cp | wc -l) fixed=$(ls fixed-cp | wc -l)"
-      - name: Collect package prefixes owned by the removed jars
+      - name: Compute packages that actually disappear
         run: |
           mkdir -p removed
           for j in base-cp/*.jar; do
             [ -f "fixed-cp/$(basename "$j")" ] || cp "$j" removed/
           done
           echo "removed jars: $(ls removed | wc -l)"
-          for j in removed/*.jar; do
-            unzip -Z1 "$j" '*.class' 2>/dev/null
-          done | sed 's/\.class$//' \
-               | awk -F/ 'NF>=3 {print $1"/"$2"/"$3"/"} NF==2 {print $1"/"$2"/"}' \
-               | sort -u > prefixes.txt
-          wc -l prefixes.txt
-          cat prefixes.txt
-      - name: Scan the surviving classpath for references
+          pkgs() {
+            for j in "$1"/*.jar; do unzip -Z1 "$j" '*.class' 2>/dev/null; done \
+              | sed 's![^/]*\.class$!!' | grep -v '^META-INF/' | sort -u
+          }
+          pkgs removed  > pkg-removed.txt
+          pkgs fixed-cp > pkg-surviving.txt
+          # Only packages no surviving jar provides can produce a dangling reference.
+          comm -23 pkg-removed.txt pkg-surviving.txt > pkg-gone.txt
+          wc -l pkg-removed.txt pkg-surviving.txt pkg-gone.txt
+          echo "== packages that disappear (top level view) =="
+          cut -d/ -f1-3 pkg-gone.txt | sort -u
+      - name: Scan the surviving classpath for references to them
         run: |
           : > hits.txt
           for j in fixed-cp/*.jar; do
-            if unzip -p "$j" '*.class' 2>/dev/null \
-                 | LC_ALL=C strings -a \
-                 | LC_ALL=C grep -F -f prefixes.txt -o 2>/dev/null \
-                 | sort -u > /tmp/h; then
-              if [ -s /tmp/h ]; then
-                while read -r pfx; do
-                  echo -e "$(basename "$j")\t$pfx" >> hits.txt
-                done < /tmp/h
-              fi
-            fi
+            unzip -p "$j" '*.class' 2>/dev/null \
+              | LC_ALL=C strings -a \
+              | LC_ALL=C grep -o -F -f pkg-gone.txt 2>/dev/null \
+              | sort -u \
+              | sed "s!^!$(basename "$j")\t!" >> hits.txt || true
           done
-          echo "== jars referencing removed packages =="
+          echo "== surviving jars referencing a package that disappears =="
           if [ -s hits.txt ]; then
-            cut -f1 hits.txt | sort -u
-            echo
-            echo "== detail =="
             sort -u hits.txt
+            echo
+            echo "distinct jars: $(cut -f1 hits.txt | sort -u | wc -l)"
           else
-            echo "none"
+            echo "none - no static reference into any removed package"
           fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: static-refs
           path: |
-            prefixes.txt
+            pkg-removed.txt
+            pkg-surviving.txt
+            pkg-gone.txt
             hits.txt
           if-no-files-found: warn
