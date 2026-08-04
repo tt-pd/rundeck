@@ -125,17 +125,29 @@ configurations {
         exclude group: 'org.apache.groovy', module: 'groovy-test-junit5'
         exclude group: 'org.apache.groovy', module: 'groovy-test'
         exclude group: 'org.apache.ant', module: 'ant-junit'
-        // Build-time only toolchain. grails-shell-cli implements the `grails` CLI and
-        // transitively drags in gradle-tooling-api, maven-resolver-*, plexus-* and
-        // sisu-inject; none of it is reachable from a running server. groovy-ant adds
-        // Ant task support plus groovy-groovydoc, which is likewise build-time only.
-        // Both were already excluded before the Grails 7 / Groovy 4 upgrade, but the
-        // upgrade renamed the coordinates (org.grails:grails-shell ->
-        // org.apache.grails:grails-shell-cli, org.codehaus.groovy -> org.apache.groovy)
-        // so the exclusions silently stopped matching and the artifacts reappeared in
-        // the packaged WAR.
+        // Build-time only toolchain that must not ship inside a server artifact.
+        //
+        // grails-shell-cli implements the `grails` CLI and transitively drags in
+        // gradle-tooling-api, maven-resolver-*, maven-model-*, plexus-* and sisu-inject.
+        // groovy-ant/groovy-groovydoc/groovy-docgenerator provide Ant task and Groovydoc
+        // support and pull in qdox. grails-gradle-model/-common are Gradle tooling models.
+        //
+        // grails-shell-cli and groovy-ant were already excluded before the Grails 7 /
+        // Groovy 4 upgrade, but the upgrade renamed their coordinates
+        // (org.grails:grails-shell -> org.apache.grails:grails-shell-cli,
+        // org.codehaus.groovy -> org.apache.groovy) so the exclusions silently stopped
+        // matching and the artifacts reappeared in the packaged WAR.
+        //
+        // The remaining entries are needed because those modules are also reachable
+        // without going through grails-shell-cli or groovy-ant:
+        //   grails-bootstrap  -> grails-gradle-model -> grails-gradle-common
+        //   groovy-all        -> groovy-groovydoc, groovy-docgenerator
+        // groovy-all comes from :rundeck-repository:rundeck-repository-client.
         exclude group: 'org.apache.grails', module: 'grails-shell-cli'
+        exclude group: 'org.apache.grails.gradle'
         exclude group: 'org.apache.groovy', module: 'groovy-ant'
+        exclude group: 'org.apache.groovy', module: 'groovy-groovydoc'
+        exclude group: 'org.apache.groovy', module: 'groovy-docgenerator'
     }
 
     implementation.exclude module: "spring-boot-starter-tomcat"
