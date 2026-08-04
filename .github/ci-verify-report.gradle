@@ -19,6 +19,9 @@ gradle.projectsEvaluated {
     }
 
     app.tasks.register('reportConfiguration') {
+        // Depend on the configuration so project-produced jars are actually built;
+        // otherwise File.length() silently reports 0 for them.
+        dependsOn { app.configurations.getByName(confName()) }
         doLast {
             def name = confName()
             def files = app.configurations.getByName(name).files.sort { it.name }
@@ -32,6 +35,7 @@ gradle.projectsEvaluated {
     }
 
     app.tasks.register('stageConfiguration') {
+        dependsOn { app.configurations.getByName(confName()) }
         doLast {
             def name = confName()
             def out = new File(app.buildDir, "ci-verify/${name}")

@@ -15,7 +15,7 @@ on:
 
 env:
   # Matched against resolved jar file names.
-  FORBIDDEN: '^(gradle-tooling-api|grails-shell-cli|grails-gradle-common|grails-gradle-model|groovy-ant|groovy-groovydoc|groovy-docgenerator|qdox|groovy-test|maven-|org\.eclipse\.sisu|plexus-|ant-antlr)-'
+  FORBIDDEN: '^(gradle-tooling-api-|grails-shell-cli-|grails-gradle-common-|grails-gradle-model-|groovy-ant-|groovy-groovydoc-|groovy-docgenerator-|qdox-|groovy-test-|maven-|org\.eclipse\.sisu\.|plexus-|ant-antlr-)'
   BASE_SHA: f2f142bc66d99d13a33a5e114dad8e11f4ca3e8e
   # Tasks that would reach the private npm registry.
   SKIP_NPM: >-
@@ -37,6 +37,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Build project jars
+        run: ./gradlew :rundeckapp:testClasses $SKIP_NPM --console=plain --no-daemon
       - name: Report both configurations, fixed
         run: |
           for c in runtimeClasspath testRuntimeClasspath; do
@@ -145,6 +147,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Build project jars
+        run: ./gradlew :rundeckapp:testClasses $SKIP_NPM --console=plain --no-daemon
       - name: Stage both classpaths
         run: |
           ./gradlew --init-script .github/ci-verify-report.gradle \
