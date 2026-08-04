@@ -1,0 +1,94 @@
+# Throwaway verification workflow. Lives only on ci-verify/** branches in a fork so the
+# PR branch stays clean.
+#
+# The WAR's WEB-INF/lib is exactly the resolved :rundeckapp:runtimeClasspath, so resolving
+# that configuration is sufficient to prove the build-time toolchain is gone. This needs
+# only a JDK: no Node and no CLOUDSMITH_NPM_TOKEN, because verifyNodeVersion is wired to
+# NpmTask only and the `dependencies` task never triggers one.
+name: verify-runtime-classpath
+
+on:
+  push:
+    branches:
+      - 'ci-verify/**'
+  workflow_dispatch:
+
+env:
+  # Artifacts that must not appear on the runtime classpath of a server.
+  FORBIDDEN: 'gradle-tooling-api|maven-resolver|maven-model|maven-artifact|maven-settings|maven-repository-metadata|maven-builder-support|plexus-|sisu|grails-shell-cli|grails-gradle-|groovy-ant|groovy-groovydoc|groovy-test'
+  # Commit this branch is based on, used to produce the before/after comparison.
+  BASE_SHA: f2f142bc66d99d13a33a5e114dad8e11f4ca3e8e
+
+jobs:
+  baseline:
+    name: base commit (expect present)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Revert build.gradle to the base commit
+        run: |
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          git --no-pager diff --stat HEAD -- rundeckapp/build.gradle
+      - name: Resolve runtimeClasspath
+        run: |
+          ./gradlew :rundeckapp:dependencies --configuration runtimeClasspath \
+            --console=plain --no-daemon | tee deps-base.txt
+      - name: Show forbidden artifacts (informational)
+        run: |
+          echo "matches on the base commit:"
+          grep -inE "$FORBIDDEN" deps-base.txt | sort -u -t: -k2 || true
+      - name: Size report
+        continue-on-error: true
+        run: |
+          ./gradlew --init-script .github/ci-verify-report.gradle \
+            :rundeckapp:reportRuntimeClasspath -q --console=plain --no-daemon \
+            | tee report-base.txt
+          grep '^TOTAL' report-base.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: |
+            deps-base.txt
+            report-base.txt
+          if-no-files-found: warn
+
+  fixed:
+    name: with exclusions (expect absent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Resolve runtimeClasspath
+        run: |
+          ./gradlew :rundeckapp:dependencies --configuration runtimeClasspath \
+            --console=plain --no-daemon | tee deps-fixed.txt
+      - name: Assert forbidden artifacts are gone
+        run: |
+          if grep -inE "$FORBIDDEN" deps-fixed.txt; then
+            echo "::error::build-time only artifacts are still on :rundeckapp:runtimeClasspath"
+            exit 1
+          fi
+          echo "OK: no build-time only artifacts on the runtime classpath"
+      - name: Size report
+        continue-on-error: true
+        run: |
+          ./gradlew --init-script .github/ci-verify-report.gradle \
+            :rundeckapp:reportRuntimeClasspath -q --console=plain --no-daemon \
+            | tee report-fixed.txt
+          grep '^TOTAL' report-fixed.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixed
+          path: |
+            deps-fixed.txt
+            report-fixed.txt
+          if-no-files-found: warn

@@ -1,0 +1,20 @@
+// Best-effort reporter: prints every artifact on :rundeckapp:runtimeClasspath with its
+// size, so the workflow can diff the resolved classpath between the base commit and the
+// fix. Applied via --init-script so it never has to live in the repository.
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.findProject(':rundeckapp')
+    if (app == null) {
+        return
+    }
+    app.tasks.register('reportRuntimeClasspath') {
+        doLast {
+            def files = app.configurations.runtimeClasspath.files.sort { it.name }
+            long total = 0
+            files.each { f ->
+                total += f.length()
+                println "ARTIFACT\t${f.length()}\t${f.name}"
+            }
+            println "TOTAL\t${files.size()}\t${total}"
+        }
+    }
+}
