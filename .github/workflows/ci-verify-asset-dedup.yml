@@ -22,6 +22,7 @@ jobs:
   # Does copyCompiledAssets still sit in the WAR's task graph, and does it still sit in
   # bootRun's? --dry-run resolves the graph without executing anything, so no npm.
   taskgraph:
+    if: github.event_name == 'workflow_dispatch'
     name: task graph diff
     runs-on: ubuntu-latest
     steps:
@@ -76,6 +77,7 @@ jobs:
   # Build a WAR with a marker file standing in for the compiled assets and look at where
   # it lands. Best effort: bootWar may fail here for reasons unrelated to this change.
   war-structure:
+    if: github.event_name == 'workflow_dispatch'
     name: WAR structure with a marker asset
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -133,6 +135,7 @@ jobs:
   # Boot the WAR and fetch the marker over HTTP. This is the part that actually proves the
   # WAR-root copy is the one being served, which is why the classpath copy can go.
   serve:
+    if: github.event_name == 'workflow_dispatch'
     name: boot the WAR and GET /assets
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -207,4 +210,55 @@ jobs:
           path: |
             body.txt
             ~/rundeck.log
+          if-no-files-found: warn
+
+  # Does a stale build/resources/main/assets from an earlier revision survive an
+  # incremental build and end up back in the WAR? Gradle has stale-output cleanup for
+  # registered output directories, so this may already be handled. Diagnostic only.
+  stale-output:
+    name: stale resources/main/assets across an incremental build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build with the parent's build.gradle
+        run: |
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          mkdir -p rundeckapp/build/assets
+          printf '// ci marker asset\n' > rundeckapp/build/assets/ci-marker.js
+          printf 'ci-marker.js=ci-marker.js\n' > rundeckapp/build/assets/manifest.properties
+          ./gradlew :rundeckapp:bootWar $SKIP_NPM --console=plain --no-daemon
+          echo "== build/resources/main/assets after the base build =="
+          ls -la rundeckapp/build/resources/main/assets/ 2>/dev/null || echo "  (absent)"
+          echo "== marker locations in the base WAR =="
+          unzip -Z1 rundeckapp/build/libs/rundeck-*.war | grep ci-marker | sort
+      - name: Rebuild with this branch's build.gradle, no clean
+        run: |
+          git checkout HEAD -- rundeckapp/build.gradle
+          ./gradlew :rundeckapp:bootWar $SKIP_NPM --console=plain --no-daemon
+          echo "== build/resources/main/assets after the incremental build =="
+          ls -la rundeckapp/build/resources/main/assets/ > staged-after.txt 2>&1 || echo "(absent)" > staged-after.txt
+          cat staged-after.txt
+          echo "== marker locations in the incremental WAR =="
+          unzip -Z1 rundeckapp/build/libs/rundeck-*.war | grep ci-marker | sort | tee marker-incremental.txt
+      - name: Verdict
+        run: |
+          if grep -q 'WEB-INF/classes/assets/ci-marker.js' marker-incremental.txt; then
+            echo "VERDICT: STALE - the duplicate survived the incremental build, a Delete task is needed"
+          else
+            echo "VERDICT: CLEAN - Gradle removed the stale output on its own"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stale-output
+          path: |
+            marker-incremental.txt
+            staged-after.txt
           if-no-files-found: warn
