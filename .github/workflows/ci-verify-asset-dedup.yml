@@ -1,0 +1,131 @@
+# Throwaway verification workflow for the compiled-asset de-duplication.
+# Lives only on ci-verify/** branches in a fork so the PR branch stays clean.
+#
+# assetCompile cannot run here: vendorAssetDeps and copySpa resolve npm packages from
+# npm.artifacts.pd-internal.com, which answers 401 without CLOUDSMITH_NPM_TOKEN. Both jobs
+# below therefore keep the NpmTask chain out of the way and substitute a marker file for
+# the compiled assets.
+name: verify-asset-dedup
+
+on:
+  push:
+    branches:
+      - 'ci-verify/**'
+  workflow_dispatch:
+
+env:
+  BASE_SHA: f2f142bc66d99d13a33a5e114dad8e11f4ca3e8e
+  SKIP_NPM: >-
+    -x copySpa -x vendorAssetDeps -x assetCompile -x assetPluginPackage
+
+jobs:
+  # Does copyCompiledAssets still sit in the WAR's task graph, and does it still sit in
+  # bootRun's? --dry-run resolves the graph without executing anything, so no npm.
+  taskgraph:
+    name: task graph diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Dry run both task graphs, fixed
+        run: |
+          for t in bootWar bootRun processResources; do
+            ./gradlew ":rundeckapp:$t" --dry-run --console=plain --no-daemon \
+              | grep -E '^:' | sort > "graph-$t-fixed.txt"
+            echo "$t fixed: $(wc -l < graph-$t-fixed.txt) tasks"
+          done
+      - name: Dry run both task graphs, base
+        run: |
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          for t in bootWar bootRun processResources; do
+            ./gradlew ":rundeckapp:$t" --dry-run --console=plain --no-daemon \
+              | grep -E '^:' | sort > "graph-$t-base.txt"
+            echo "$t base: $(wc -l < graph-$t-base.txt) tasks"
+          done
+          git checkout HEAD -- rundeckapp/build.gradle
+      - name: Report
+        run: |
+          for t in bootWar bootRun processResources; do
+            echo "===== :rundeckapp:$t"
+            diff "graph-$t-base.txt" "graph-$t-fixed.txt" && echo "  (identical)"
+            echo "  copyCompiledAssets  base=$(grep -c copyCompiledAssets graph-$t-base.txt || true) fixed=$(grep -c copyCompiledAssets graph-$t-fixed.txt || true)"
+            echo
+          done
+      - name: Assert
+        run: |
+          fail=0
+          grep -q copyCompiledAssets graph-bootWar-base.txt \
+            || { echo "::error::base bootWar graph should contain copyCompiledAssets"; fail=1; }
+          grep -q copyCompiledAssets graph-bootWar-fixed.txt \
+            && { echo "::error::fixed bootWar graph still contains copyCompiledAssets"; fail=1; }
+          grep -q copyCompiledAssets graph-bootRun-fixed.txt \
+            || { echo "::error::fixed bootRun graph lost copyCompiledAssets"; fail=1; }
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: taskgraph
+          path: graph-*.txt
+          if-no-files-found: warn
+
+  # Build a WAR with a marker file standing in for the compiled assets and look at where
+  # it lands. Best effort: bootWar may fail here for reasons unrelated to this change.
+  war-structure:
+    name: WAR structure with a marker asset
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build WAR, base
+        id: base
+        continue-on-error: true
+        run: |
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          mkdir -p rundeckapp/build/assets
+          echo "// ci marker" > rundeckapp/build/assets/ci-marker.js
+          ./gradlew :rundeckapp:bootWar $SKIP_NPM --console=plain --no-daemon
+          w=$(ls rundeckapp/build/libs/rundeck-*.war | head -1)
+          echo "war=$w  $(stat -c%s "$w") bytes"
+          unzip -Z1 "$w" | grep -E '(^|/)assets/' | sed 's!/[^/]*$!/!' | sort -u > layout-base.txt
+          unzip -Z1 "$w" | grep ci-marker > marker-base.txt || true
+          cp "$w" /tmp/base.war
+          git checkout HEAD -- rundeckapp/build.gradle
+      - name: Build WAR, fixed
+        id: fixed
+        continue-on-error: true
+        run: |
+          ./gradlew :rundeckapp:clean --console=plain --no-daemon
+          mkdir -p rundeckapp/build/assets
+          echo "// ci marker" > rundeckapp/build/assets/ci-marker.js
+          ./gradlew :rundeckapp:bootWar $SKIP_NPM --console=plain --no-daemon
+          w=$(ls rundeckapp/build/libs/rundeck-*.war | head -1)
+          echo "war=$w  $(stat -c%s "$w") bytes"
+          unzip -Z1 "$w" | grep -E '(^|/)assets/' | sed 's!/[^/]*$!/!' | sort -u > layout-fixed.txt
+          unzip -Z1 "$w" | grep ci-marker > marker-fixed.txt || true
+      - name: Report
+        if: always()
+        run: |
+          for f in layout-base.txt layout-fixed.txt marker-base.txt marker-fixed.txt; do
+            echo "===== $f"
+            [ -f "$f" ] && cat "$f" || echo "  (not produced)"
+            echo
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: war-structure
+          path: |
+            layout-*.txt
+            marker-*.txt
+          if-no-files-found: warn
