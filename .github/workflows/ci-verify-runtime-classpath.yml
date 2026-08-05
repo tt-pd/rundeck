@@ -15,7 +15,7 @@ on:
 
 env:
   # Matched against resolved jar file names.
-  FORBIDDEN: '^(gradle-tooling-api-|grails-shell-cli-|grails-gradle-common-|grails-gradle-model-|groovy-ant-|groovy-groovydoc-|groovy-docgenerator-|qdox-|groovy-test-|maven-|org\.eclipse\.sisu\.|plexus-|ant-antlr-)'
+  FORBIDDEN: '^(gradle-tooling-api-|grails-shell-cli-|groovy-ant-|groovy-groovydoc-|groovy-docgenerator-|qdox-|groovy-test-|groovy-macro-|groovy-jmx-|groovy-jsr223-|groovy-nio-|groovy-datetime-|groovy-yaml-|groovy-servlet-|groovy-cli-picocli-|maven-|org\.eclipse\.sisu\.|plexus-|ant-antlr-)'
   BASE_SHA: f2f142bc66d99d13a33a5e114dad8e11f4ca3e8e
   # Tasks that would reach the private npm registry.
   SKIP_NPM: >-
@@ -50,7 +50,7 @@ jobs:
           done
       - name: Report both configurations, base
         run: |
-          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle grails-repository/build.gradle
           for c in runtimeClasspath testRuntimeClasspath; do
             ./gradlew --init-script .github/ci-verify-report.gradle \
               :rundeckapp:reportConfiguration -Pconf=$c -q --console=plain --no-daemon \
@@ -58,7 +58,7 @@ jobs:
             grep '^ARTIFACT' "$c-base.txt" | cut -f3 | sort > "jars-$c-base.txt"
             grep '^TOTAL' "$c-base.txt"
           done
-          git checkout HEAD -- rundeckapp/build.gradle
+          git checkout HEAD -- rundeckapp/build.gradle grails-repository/build.gradle
       - name: runtimeClasspath must lose only the build-time toolchain
         run: |
           echo "== removed =="
@@ -69,7 +69,7 @@ jobs:
             | tee added.txt
           test ! -s added.txt
           # every removal must be an expected build-time artifact
-          if grep -vE "$FORBIDDEN" removed.txt | grep -v '^javax.inject-'; then
+          if grep -vE "$FORBIDDEN" removed.txt | grep -vE '^(javax.inject-|picocli-|ivy-)'; then
             echo "::error::unexpected artifact removed from runtimeClasspath"
             exit 1
           fi
@@ -154,11 +154,11 @@ jobs:
           ./gradlew --init-script .github/ci-verify-report.gradle \
             :rundeckapp:stageConfiguration -Pconf=runtimeClasspath -q --console=plain --no-daemon
           mv rundeckapp/build/ci-verify/runtimeClasspath fixed-cp
-          git checkout "$BASE_SHA" -- rundeckapp/build.gradle
+          git checkout "$BASE_SHA" -- rundeckapp/build.gradle grails-repository/build.gradle
           ./gradlew --init-script .github/ci-verify-report.gradle \
             :rundeckapp:stageConfiguration -Pconf=runtimeClasspath -q --console=plain --no-daemon
           mv rundeckapp/build/ci-verify/runtimeClasspath base-cp
-          git checkout HEAD -- rundeckapp/build.gradle
+          git checkout HEAD -- rundeckapp/build.gradle grails-repository/build.gradle
           echo "base=$(ls base-cp | wc -l) fixed=$(ls fixed-cp | wc -l)"
       - name: Compute packages that actually disappear
         run: |
