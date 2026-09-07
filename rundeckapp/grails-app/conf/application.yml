@@ -393,6 +393,17 @@ beans:
 
 server:
     port: 4440
+    # HTTP response compression. Only assets served by the asset-pipeline filter were previously
+    # compressed, because that filter serves pre-built .gz siblings. Everything produced at request
+    # time (GSP pages, API JSON, UI plugin resources under /plugin/file/**) was sent uncompressed.
+    # Jetty's GzipHandler skips responses that already carry a Content-Encoding header, so the
+    # pre-compressed assets and the per-endpoint gzip in ControllerBase.renderCompressed are
+    # unaffected. Set enabled=false to restore the previous behaviour.
+    # NOTE: this is an embedded-server property and therefore has no effect when the WAR is deployed
+    # into an external servlet container (see WarInitializer); those deployments must enable
+    # compression in the container or in a fronting reverse proxy.
+    compression:
+        enabled: true
     servlet:
         session:
             persistent: false
